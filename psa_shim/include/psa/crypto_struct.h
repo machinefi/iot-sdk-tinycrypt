@@ -48,6 +48,18 @@ extern "C" {
 
 #include "tinycrypt/ctr_prng.h"
 #include "tinycrypt/sha256.h"
+#include "tinycrypt/hmac.h"
+#include "tinycrypt/aes.h"
+
+#ifndef MAX_KEY_HANDLES
+    #define MAX_KEY_HANDLES 64
+#endif
+#ifndef PSA_KEY_SLOT_COUNT
+    #define PSA_KEY_SLOT_COUNT 32
+#endif
+#ifndef PSA_OPERATION_COUNT
+    #define PSA_OPERATION_COUNT 32
+#endif
 
 typedef enum
 {
@@ -56,12 +68,28 @@ typedef enum
     TC_RNG_RESEEDED
 } tc_rng_state_t;
 
-typedef struct
+#define KEY_ID_INVALID 0xFFFFFFFF;
+
+typedef struct 
 {
-    bool initialized;
-    tc_rng_state_t rng_state;
-    TCCtrPrng_t rng;
-} tc_psa_global_data_t;
+    struct
+    {
+        uint16_t type;
+        uint16_t bits;
+        uint32_t lifetime;
+        uint32_t usage;
+        uint32_t alg;
+    } attr;
+    uint32_t handle;
+    bool in_use;  // If 0 then the slot is free
+    /* Dynamically allocated key data buffer.
+     * Format as specified in psa_export_key(). */
+    struct key_data
+    {
+        uint8_t *data;
+        size_t bytes;
+    } key;
+} psa_key_slot_t;
 
 #define GUARD_MODULE_INITIALIZED        \
     if( global_data.initialized == 0 )  \
@@ -77,7 +105,7 @@ typedef enum
 
 typedef enum
 {
-    HASH_OPERATION_STATE_INVALID,
+    HASH_OPERATION_STATE_FREE,
     HASH_OPERATION_STATE_INITIALISED,
     HASH_OPERATION_STATE_INPROGRESS,
     HASH_OPERATION_STATE_ABORTED
@@ -101,17 +129,17 @@ static inline struct psa_hash_operation_s psa_hash_operation_init( void )
     #define PSA_MAX_OPERATIONS 8
 #endif
 
-
-// #define PSA_HASH_OPERATION_INIT {0}
-// static inline struct psa_hash_operation_s psa_hash_operation_init( void )
-// {
-//     const struct psa_hash_operation_s v = PSA_HASH_OPERATION_INIT;
-//     return( v );
-// }
+typedef enum
+{
+    MAC_OPERATION_STATE_FREE,
+    MAC_OPERATION_STATE_INITIALISED,
+    MAC_OPERATION_STATE_INPROGRESS
+} tc_psa_mac_operation_state_t;
 
 struct psa_mac_operation_s
 {
-    uint32_t handle;
+    tc_psa_mac_operation_state_t state;
+    struct tc_hmac_state_struct ctx;
 };
 
 #define PSA_MAC_OPERATION_INIT {0}
@@ -121,9 +149,26 @@ static inline struct psa_mac_operation_s psa_mac_operation_init( void )
     return( v );
 }
 
+typedef enum
+{
+    CIPHER_OPERATION_STATE_FREE,
+    CIPHER_OPERATION_STATE_NO_IV,
+    CIPHER_OPERATION_STATE_ACTIVE
+} tc_psa_cipher_operation_state_t;
+
+typedef enum
+{
+    CIPHER_OPERATION_TYPE_ENCRYPT,
+    CIPHER_OPERATION_TYPE_DECRYPT
+} tc_psa_cipher_operation_type_t;
+
 struct psa_cipher_operation_s
 {
-    uint32_t handle;
+    tc_psa_cipher_operation_state_t state;
+    tc_psa_cipher_operation_type_t type;
+    uint32_t alg;
+    TCAesKeySched_t ctx;
+    uint8_t iv[16];
 };
 
 #define PSA_CIPHER_OPERATION_INIT {0}
@@ -156,6 +201,19 @@ static inline struct psa_key_derivation_s psa_key_derivation_operation_init( voi
     const struct psa_key_derivation_s v = PSA_KEY_DERIVATION_OPERATION_INIT;
     return( v );
 }
+
+typedef struct
+{
+    bool initialized;
+    tc_rng_state_t rng_state;
+    TCCtrPrng_t rng;
+    uint32_t invalid_key_handles[MAX_KEY_HANDLES];
+    uint32_t invalid_key_handles_count;
+    uint32_t next_key_handle;
+    psa_key_slot_t key_slots[PSA_KEY_SLOT_COUNT];
+    size_t key_slots_used;
+    struct psa_hash_operation_s hash_operations[PSA_OPERATION_COUNT];
+} tc_psa_global_data_t;
 
 /* The type used internally for key sizes.
  * Public interfaces use size_t, but internally we use a smaller type. */
